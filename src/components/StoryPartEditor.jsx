@@ -30,6 +30,39 @@ export default function StoryPartEditor({ totalParts = 50, book }) {
   const [generationProgress, setGenerationProgress] = useState({});
   const [initialLoading, setInitialLoading] = useState(true);
 
+  const savePart = async (part) => {
+    const record = {
+      book_id: book.id,
+      part_number: part.part_number,
+      summary: part.summary,
+      content: part.content,
+      created_at: new Date().toISOString(),
+    };
+  
+    if (part.id) {
+      record.id = part.id;
+    }
+  
+    const { data, error } = await supabase
+      .from("story_parts")
+      .upsert([record], {
+        onConflict: ["book_id", "part_number"],
+      })
+      .select();
+  
+    if (error) {
+      console.error("❌ Supabase save error:", error);
+    } else if (data?.[0]) {
+      setParts((prev) =>
+        prev.map((p) =>
+          p.part_number === part.part_number
+            ? { ...p, id: data[0].id, saved: true }
+            : p
+        )
+      );
+    }
+  };
+  
   useEffect(() => {
     if (!book?.id) return;
     const loadSavedParts = async () => {
@@ -65,85 +98,78 @@ export default function StoryPartEditor({ totalParts = 50, book }) {
   }, [book?.id, totalParts]);
 
   useEffect(() => {
-    if (parts.length > 0 && book) {
+    if (parts.length > 0 && book && initialLoading) {
       generateInitialSummaries(book);
     }
-  }, [parts.length, activeRange, book]);
+  }, [parts.length, activeRange, book, initialLoading]);
 
-  const savePart = async (part) => {
-    const record = {
-      book_id: book.id,
-      part_number: part.part_number,
-      summary: part.summary,
-      content: part.content,
-      created_at: new Date().toISOString(),
-    };
-
-    if (part.id) {
-      record.id = part.id;
-    }
-
-    const { data, error } = await supabase
+  const clearAllSummaries = async () => {
+    const { error } = await supabase
       .from("story_parts")
-      .upsert([record], {
-        onConflict: ["book_id", "part_number"],
-      })
-      .select();
-
+      .update({ summary: "" })
+      .eq("book_id", book.id);
+  
     if (error) {
-      console.error("❌ Supabase save error:", error);
-    } else if (data?.[0]) {
-      setParts((prev) =>
-        prev.map((p) =>
-          p.part_number === part.part_number
-            ? { ...p, id: data[0].id, saved: true }
-            : p
-        )
-      );
+      console.error("❌ Failed to clear summaries:", error.message);
+    } else {
+      console.log("✅ All summaries cleared.");
+  
+      // Clear local state and regenerate
+      const refreshed = parts.map((p) => ({
+        ...p,
+        summary: "",
+        saved: false,
+      }));
+  
+      setParts(refreshed);
+      setInitialLoading(true); // ⏳ show spinner
     }
   };
 
   const generateInitialSummaries = async (book) => {
     const updated = [...parts];
 
-    for (let i = activeRange[0]; i < activeRange[1]; i++) {
-      if (!updated[i]?.summary) {
-        const prompt = `
-        Generate a detailed summary in Malayalam for Part ${i + 1} of a serialized story.
+    try {
+      for (let i = activeRange[0]; i < activeRange[1]; i++) {
+        if (!updated[i]?.summary) {
+          const prompt = `
+          Generate a concise summary (maximum 200 words) of part ${i + 1} from a commercial fiction series in Malayalam.
 
-        Story Context:
-        - Premise: ${book.prompt}
-        - Genres: ${book.genres?.join(", ") || "Not specified"}
-        - Setting: ${book.setting || "Not specified"}
-        - Theme: ${book.theme || "Not specified"}
-        - Point of View: ${book.pov || "Not specified"}
-        - Dialogue Style: ${book.dialogue_style || "Not specified"}
+          Story Context:
+          - Premise: ${book.prompt}
+          - Genres: ${book.genres?.join(", ") || "Not specified"}
+          - Setting: ${book.setting || "Not specified"}
+          - Theme: ${book.theme || "Not specified"}
+          - Point of View: ${book.pov || "Not specified"}
+          - Dialogue Style: ${book.dialogue_style || "Not specified"}
 
-        Instructions:
-        - Summary must be written in simple Malayalam.
-        - Less than 200 words.
-        - Include:
-            - Main characters involved in this part.
-            - Key plot developments and events.
-            - Important character revelations or twists.
-            - Where this part ends (preferably a cliffhanger).
-        - Be vivid but concise. Write like you're outlining this part for an author to expand into full prose.
+          Instructions:
+          Language & Tone: Use informal, natural, and conversational Malayalam. Maintain the same accessible and engaging tone as the story parts themselves.
+          Conciseness: Be direct and to the point. Focus on the most crucial plot developments, character actions, key events and significant emotional shifts.
+          Clarity: Ensure the summary is easy to understand, even for someone who hasn't read the full part. Avoid ambiguity.
+          Conflict: The summary should contain a key conflict which drives the part towards the end.
+          Key Information: Include:
+            - Main events that occurred.
+            - Major character decisions or revelations.
+            - The outcome or cliffhanger at the end of the part.
+          No Spoilers for Future Parts: Only summarize what happened within the specified part.
+          No Dialogue: The summary should be purely narrative, without direct dialogue quotes.
+          No Personal Opinions: Stick to objective summarization of the plot.
+          Only return the summary — no explanations or formatting.
+          `.trim();
 
-        Only return the summary — no explanations or formatting.
-        `.trim();
-
-        try {
           const summary = await generateWithGemini(prompt);
           updated[i].summary = summary;
           await savePart(updated[i]);
-        } catch (err) {
-          console.error(`❌ Failed to generate summary for part ${i + 1}:`, err);
         }
       }
-    }
 
-    setParts(updated);
-    setInitialLoading(false); // ✅ Hide overlay after summaries are done
+      setParts(updated);
+    } catch (err) {
+      console.error("❌ Summary generation error:", err);
+    } finally {
+      setInitialLoading(false);
+    }
   };
 
   const toggleEdit = (index) => {
@@ -171,14 +197,23 @@ export default function StoryPartEditor({ totalParts = 50, book }) {
 
     while (currentWordCount < targetWordCount) {
       const prompt = `
-      Write the next part of a serialized story in Malayalam.
+      Generate a detailed and fully fleshed-out story part for a commercial fiction series in Malayalam.
       The overall story part ${index + 1} is based on the following summary: "${summary}"
 
-      Guidelines:
-      - Begin and end with dialogue
-      - Use informal, natural Malayalam
-      - Include rich emotional narration and character interaction
-      - Do not summarize
+      Key Requirements:
+
+         - Language & Tone: Use informal, natural, and conversational Malayalam. Avoid overly formal or classic literary language. Aim for a style accessible to a general audience who enjoy commercial fiction.
+         - Narrative Style:
+            - Emotional Depth: Include rich emotional narration, allowing the reader to deeply connect with the characters' feelings, thoughts, and internal conflicts.
+            - Character Interaction: Prioritize high use of dialogue that feels authentic and natural. Show character relationships and development through their conversations.
+            - Pacing: Maintain a good pace, balancing descriptive passages with action and dialogue.
+            - Climax/Cliffhanger: The part must end on a cliffhanger to entice the reader for the next installment.
+            - No Summarizing: Do not summarize events; describe them as they happen.
+
+          - Content:
+            - Beginning & End: Must begin and end with dialogue.
+            - Originality: Do not plagiarize.
+            - Context: Ensure the story flows logically from previous parts 
 
       Current story so far:
       "${fullStoryAccumulated}"
@@ -236,6 +271,15 @@ export default function StoryPartEditor({ totalParts = 50, book }) {
           <div className="text-lg font-semibold mb-2">
             Showing parts {activeRange[0] + 1} to {activeRange[1]}
           </div>
+        </div>
+
+        <div className="flex justify-end mb-4">
+          <button
+            onClick={() => clearAllSummaries(book.id)}
+            className="text-sm text-red-600 border border-red-300 px-3 py-1 rounded hover:bg-red-100"
+          >
+            🔄 Reset All Summaries
+          </button>
         </div>
 
         {visibleParts.map((part, index) => {
